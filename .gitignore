@@ -416,3 +416,8 @@ FodyWeavers.xsd
 *.msix
 *.msm
 *.msp
+
+# NuGet release packages — keep tracked in git (root-level only)
+!/release/
+!/release/*.nupkg
+!/release/*.snupkg
