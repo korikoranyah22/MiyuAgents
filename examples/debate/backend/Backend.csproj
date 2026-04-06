@@ -6,6 +6,6 @@
     <RootNamespace>Example</RootNamespace>
   </PropertyGroup>
   <ItemGroup>
-    <ProjectReference Include="..\..\src\MiyuAgents.csproj" />
+    <ProjectReference Include="..\..\..\src\MiyuAgents.csproj" />
   </ItemGroup>
 </Project>

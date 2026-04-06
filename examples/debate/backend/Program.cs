@@ -28,12 +28,12 @@ var sessions = new ConcurrentDictionary<string, DebateSession>();
 
 app.MapPost("/api/start", (StartRequest req) =>
 {
-    ILlmGateway gateway = req.Provider.ToLowerInvariant() switch
+    ILlmGateway gateway = new LoggingGateway(req.Provider.ToLowerInvariant() switch
     {
-        "anthropic" => new AnthropicGateway(req.ApiKey, req.Model),
+        "anthropic" => (ILlmGateway)new AnthropicGateway(req.ApiKey, req.Model),
         "deepseek"  => new OpenAiGateway(req.ApiKey, req.Model, "https://api.deepseek.com"),
         _           => new OpenAiGateway(req.ApiKey, req.Model, "https://api.openai.com")
-    };
+    });
 
     var orchestrator = new DefaultGroupOrchestrator(
         strategy:          new DebateTurnStrategy(),

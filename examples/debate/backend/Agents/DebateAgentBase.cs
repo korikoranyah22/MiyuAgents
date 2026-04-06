@@ -30,15 +30,20 @@ public abstract class DebateAgentBase(string model, ILlmGateway gateway)
     {
         bool isRebuttal = ctx.Metadata.TryGetValue("debate_round", out var dr) && dr is "rebuttal";
 
+        // Reframe history from this agent's perspective:
+        //   own past messages → "assistant"  (I said this)
+        //   everything else   → "user"       (human + other agent = my interlocutor)
+        //
+        // This gives the LLM a clean alternating user/assistant structure so it
+        // generates exactly one assistant turn and stops naturally — preventing it
+        // from fabricating the other agent's response without needing stop sequences.
+        // ctx.History already contains the current user message as its last entry
+        // (injected by DefaultGroupOrchestrator before calling the agent).
         var messages = ctx.History
-            .Select(h => new ConversationMessage(h.Role, h.Content, h.Name))
+            .Select(h => new ConversationMessage(
+                h.Name == AgentName ? "assistant" : "user",
+                h.Content))
             .ToList();
-
-        // Append the current user message if it isn't already the last entry
-        // (guards against double-append when called from different orchestrators).
-        bool currentMsgPresent = messages.Any(m => m.Role == "user" && m.Content == ctx.UserMessage);
-        if (!currentMsgPresent)
-            messages.Add(new ConversationMessage("user", ctx.UserMessage));
 
         var effectivePrompt = isRebuttal
             ? SystemPrompt + $"""

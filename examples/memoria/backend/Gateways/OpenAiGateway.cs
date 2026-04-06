@@ -4,11 +4,10 @@ using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
 
-namespace Example.Gateways;
+namespace Memoria.Gateways;
 
 /// <summary>
-/// OpenAI-compatible gateway. Works for OpenAI and DeepSeek (same API, different base URL).
-/// Created per-request — not a singleton.
+/// OpenAI-compatible gateway (OpenAI + DeepSeek share the same API shape).
 /// </summary>
 public sealed class OpenAiGateway : GatewayBase
 {
@@ -33,54 +32,39 @@ public sealed class OpenAiGateway : GatewayBase
 
     protected override async Task<LlmResponse> CompleteInternalAsync(LlmRequest req, CancellationToken ct)
     {
-        // System message is injected as the first message in the array.
-        // ConversationMessage.Name is passed as the OpenAI "name" field so the model
-        // can distinguish multiple speakers sharing the same role (e.g. two agents
-        // both using "assistant"). OpenAI requires names to be alphanumeric/dash/underscore.
-        var msgs = new object[] { new { role = "system", content = req.SystemPrompt ?? "" } }
-            .Concat(req.Messages.Select(m => m.Name is { } n
-                ? (object)new { role = m.Role, content = m.Content, name = SanitizeName(n) }
-                : new { role = m.Role, content = m.Content }))
-            .ToArray();
-
+        var msgs = BuildMessages(req);
         var payload = JsonSerializer.Serialize(new
         {
             model       = req.Model,
             messages    = msgs,
-            max_tokens  = req.MaxTokens ?? 250,
-            temperature = req.Temperature ?? 0.8f
+            max_tokens  = req.MaxTokens ?? 500,
+            temperature = req.Temperature ?? 0.75f
         });
 
         using var content = new StringContent(payload, Encoding.UTF8, "application/json");
         using var res     = await _http.PostAsync($"{_baseUrl}/v1/chat/completions", content, ct);
         res.EnsureSuccessStatusCode();
 
-        using var doc  = JsonDocument.Parse(await res.Content.ReadAsStringAsync(ct));
-        var root       = doc.RootElement;
-        var text       = root.GetProperty("choices")[0].GetProperty("message").GetProperty("content").GetString() ?? "";
-        var finish     = root.GetProperty("choices")[0].GetProperty("finish_reason").GetString();
-        var usage      = root.GetProperty("usage");
-        var inTok      = usage.GetProperty("prompt_tokens").GetInt32();
-        var outTok     = usage.GetProperty("completion_tokens").GetInt32();
-
-        return new LlmResponse(text, new LlmUsage(inTok, outTok), finish);
+        using var doc = JsonDocument.Parse(await res.Content.ReadAsStringAsync(ct));
+        var root  = doc.RootElement;
+        var text  = root.GetProperty("choices")[0].GetProperty("message").GetProperty("content").GetString() ?? "";
+        var usage = root.GetProperty("usage");
+        return new LlmResponse(text,
+            new LlmUsage(usage.GetProperty("prompt_tokens").GetInt32(),
+                         usage.GetProperty("completion_tokens").GetInt32()),
+            root.GetProperty("choices")[0].GetProperty("finish_reason").GetString());
     }
 
     protected override async IAsyncEnumerable<LlmChunk> StreamInternalAsync(
         LlmRequest req, [EnumeratorCancellation] CancellationToken ct)
     {
-        var msgs = new object[] { new { role = "system", content = req.SystemPrompt ?? "" } }
-            .Concat(req.Messages.Select(m => m.Name is { } n
-                ? (object)new { role = m.Role, content = m.Content, name = SanitizeName(n) }
-                : new { role = m.Role, content = m.Content }))
-            .ToArray();
-
+        var msgs = BuildMessages(req);
         var payload = JsonSerializer.Serialize(new
         {
             model       = req.Model,
             messages    = msgs,
-            max_tokens  = req.MaxTokens ?? 250,
-            temperature = req.Temperature ?? 0.8f,
+            max_tokens  = req.MaxTokens ?? 500,
+            temperature = req.Temperature ?? 0.75f,
             stream      = true
         });
 
@@ -104,10 +88,10 @@ public sealed class OpenAiGateway : GatewayBase
             var data = line[6..].Trim();
             if (data == "[DONE]") break;
 
-            using var doc = JsonDocument.Parse(data);
-            var root   = doc.RootElement;
-            var choice = root.GetProperty("choices")[0];
-            var delta  = choice.GetProperty("delta");
+            using var doc  = JsonDocument.Parse(data);
+            var root       = doc.RootElement;
+            var choice     = root.GetProperty("choices")[0];
+            var delta      = choice.GetProperty("delta");
 
             if (delta.TryGetProperty("content", out var cp) && cp.ValueKind == JsonValueKind.String)
             {
@@ -115,7 +99,6 @@ public sealed class OpenAiGateway : GatewayBase
                 if (!string.IsNullOrEmpty(token))
                     yield return new LlmChunk(token, false, false, null);
             }
-
             if (root.TryGetProperty("usage", out var up))
             {
                 inputTokens  = up.GetProperty("prompt_tokens").GetInt32();
@@ -126,10 +109,8 @@ public sealed class OpenAiGateway : GatewayBase
         yield return new LlmChunk("", true, false, new LlmUsage(inputTokens, outputTokens));
     }
 
-    // OpenAI name field: only alphanumeric, hyphen, underscore; max 64 chars.
-    private static string SanitizeName(string name)
-    {
-        var sanitized = System.Text.RegularExpressions.Regex.Replace(name, @"[^\w\-]", "_");
-        return sanitized.Length > 64 ? sanitized[..64] : sanitized;
-    }
+    private static object[] BuildMessages(LlmRequest req) =>
+        new object[] { new { role = "system", content = req.SystemPrompt ?? "" } }
+        .Concat(req.Messages.Select(m => (object)new { role = m.Role, content = m.Content }))
+        .ToArray();
 }
