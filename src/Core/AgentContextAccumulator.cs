@@ -26,8 +26,9 @@ public sealed class AgentContextAccumulator
     public bool?   ImageIsSfw       { get; set; }
 
     // Conversation agent populates this
-    public string?   LlmResponse  { get; set; }
-    public LlmUsage? TokenUsage   { get; set; }
+    public string?   LlmResponse      { get; set; }
+    public LlmUsage? TokenUsage       { get; set; }
+    public string?   ReasoningContent { get; set; }
 
     // Arbitrary extra data any agent can store by key
     public IDictionary<string, object> Extra { get; } = new Dictionary<string, object>();

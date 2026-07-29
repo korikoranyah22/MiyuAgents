@@ -136,3 +136,17 @@ public class LlmGatewayRouter_Resolve_CaseInsensitive
         router.Resolve("Gpt-4O").ProviderName.Should().Be("openai");
     }
 }
+
+public class LlmGatewayRouter_DuplicateModelMetadata
+{
+    [Fact]
+    public void DuplicateWithinGateway_DoesNotCrashAndResolvesGateway()
+    {
+        var gateway = FakeGateway.ForProvider(
+            "venice", "qwen3-vl-235b-a22b", "qwen3-vl-235b-a22b");
+
+        var router = new LlmGatewayRouter([gateway]);
+
+        router.Resolve("qwen3-vl-235b-a22b").Should().BeSameAs(gateway);
+    }
+}

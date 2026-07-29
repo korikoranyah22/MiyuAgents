@@ -1,5 +1,6 @@
 using FluentAssertions;
 using Microsoft.Extensions.Logging.Abstractions;
+using MiyuAgents.Llm;
 using MiyuAgents.Pipeline;
 using MiyuAgents.Tests.Unit.Fakes;
 using Xunit;
@@ -90,6 +91,32 @@ public class PipelineRunner_Run_EmptyStages_NoThrow : IAsyncLifetime
     [Fact] public void TotalLatency_IsPositive() => _result.TotalLatency.Should().BeGreaterThanOrEqualTo(TimeSpan.Zero);
 
     public Task DisposeAsync() => Task.CompletedTask;
+}
+
+public class PipelineRunner_Run_StageAttributionScope
+{
+    [Fact]
+    public async Task Stage_ReceivesAmbientMetadata_AndScopeIsRestoredAfterwards()
+    {
+        LlmCallMetadata? observed = null;
+        var stage = new FakePipelineStage("llm-stage", 10,
+            (_, _, _) =>
+            {
+                observed = LlmCallScope.Current;
+                return Task.FromResult(PipelineStageResult.Continue("llm-stage"));
+            });
+        var ctx = TestBuilders.Context();
+        var runner = new PipelineRunner([stage], NullLogger<PipelineRunner>.Instance);
+
+        await runner.RunAsync(ctx, TestBuilders.Pipeline(), CancellationToken.None);
+
+        observed.Should().NotBeNull();
+        observed!.Workflow.Should().Be("conversation-pipeline");
+        observed.Node.Should().Be("llm-stage");
+        observed.Phase.Should().Be("execute");
+        observed.RunId.Should().Be(ctx.MessageId);
+        LlmCallScope.Current.Should().BeNull();
+    }
 }
 
 // ── TurnResult.Response comes from accumulator ───────────────────────────────

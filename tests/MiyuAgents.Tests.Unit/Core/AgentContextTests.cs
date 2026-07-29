@@ -106,3 +106,43 @@ public class AgentContext_WithExpression_PreservesImmutability
         copy.Model.Should().Be("claude-3");
     }
 }
+
+public class AgentContext_Mode_TypedReplacesMagicStrings
+{
+    private readonly AgentContext _ctx = AgentContext.For("c", "m", "hi");
+
+    [Fact]
+    public void Mode_DefaultsToNormal()
+    {
+        _ctx.Mode.Should().Be(ConversationMode.Normal);
+        _ctx.IsGroup.Should().BeFalse();
+        _ctx.IsDream.Should().BeFalse();
+        _ctx.IsCarnal.Should().BeFalse();
+    }
+
+    [Fact]
+    public void Mode_Group_OnlyGroupFlagSet()
+    {
+        var c = _ctx with { Mode = ConversationMode.Group };
+        c.IsGroup.Should().BeTrue();
+        c.IsDream.Should().BeFalse();
+        c.IsCarnal.Should().BeFalse();
+    }
+
+    [Fact]
+    public void Mode_Composes_WetDreamIsDreamPlusCarnal()
+    {
+        var c = _ctx with { Mode = ConversationMode.Dream | ConversationMode.Carnal };
+        c.IsDream.Should().BeTrue();
+        c.IsCarnal.Should().BeTrue();
+        c.IsGroup.Should().BeFalse();
+    }
+
+    [Fact]
+    public void Mode_Dream_WithoutCarnal_IsNotCarnal()
+    {
+        var c = _ctx with { Mode = ConversationMode.Dream };
+        c.IsDream.Should().BeTrue();
+        c.IsCarnal.Should().BeFalse();
+    }
+}

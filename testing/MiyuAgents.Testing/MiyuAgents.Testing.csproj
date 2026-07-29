@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>MiyuAgents.Testing</RootNamespace>
+    <!-- Librería de soporte para tests: doubles deterministas sin LLM.
+         La referencian el ejemplo turnpolicy y (a futuro) las suites de tests
+         para no redefinir agentes guionados en cada proyecto. -->
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\MiyuAgents.csproj" />
+  </ItemGroup>
+</Project>

@@ -18,13 +18,17 @@ public sealed record GroupConversationContext
     public required string          MessageId           { get; init; }
     public required string          ProfileId           { get; init; }
     public required string          CharacterId         { get; init; }
+    public IReadOnlyList<string>    ParticipantProfileIds { get; init; } = [];
     public required string          UserMessage         { get; init; }
     public string?                  OriginalFullMessage { get; init; }
-    public byte[]?                  ImageBytes          { get; init; }
-    public string?                  ImageMediaType      { get; init; }
+    public IReadOnlyList<MediaAttachment> Attachments   { get; init; } = [];
+    /// <summary>Compat: vista computada sobre <see cref="Attachments"/> (ver AgentContext).</summary>
+    public byte[]?  ImageBytes     => Attachments.FirstOrDefault(a => a.Kind == AttachmentKind.Image)?.Bytes;
+    public string?  ImageMediaType => Attachments.FirstOrDefault(a => a.Kind == AttachmentKind.Image)?.MediaType;
     public required IReadOnlyList<ConversationMessage> History { get; init; }
     public required bool            IsFirstTurn         { get; init; }
     public required string          Model               { get; init; }
+    public ConversationMode         Mode                { get; init; } = ConversationMode.Normal;
     public IDictionary<string, object> Metadata         { get; init; } = new Dictionary<string, object>();
 
     // ── Group conversation state ────────────────────────────────────────────
@@ -68,13 +72,14 @@ public sealed record GroupConversationContext
             MessageId           = MessageId,
             ProfileId           = ProfileId,
             CharacterId         = CharacterId,
+            ParticipantProfileIds = ParticipantProfileIds,
             UserMessage         = UserMessage,
             OriginalFullMessage = OriginalFullMessage,
-            ImageBytes          = ImageBytes,
-            ImageMediaType      = ImageMediaType,
+            Attachments         = Attachments,
             History             = History,
             IsFirstTurn         = IsFirstTurn,
             Model               = Model,
+            Mode                = Mode,
             Metadata            = Metadata
         };
 
@@ -92,13 +97,14 @@ public sealed record GroupConversationContext
             MessageId           = baseCtx.MessageId,
             ProfileId           = baseCtx.ProfileId,
             CharacterId         = baseCtx.CharacterId,
+            ParticipantProfileIds = baseCtx.ParticipantProfileIds,
             UserMessage         = baseCtx.UserMessage,
             OriginalFullMessage = baseCtx.OriginalFullMessage,
-            ImageBytes          = baseCtx.ImageBytes,
-            ImageMediaType      = baseCtx.ImageMediaType,
+            Attachments         = baseCtx.Attachments,
             History             = baseCtx.History,
             IsFirstTurn         = baseCtx.IsFirstTurn,
             Model               = baseCtx.Model,
+            Mode                = baseCtx.Mode,
             Metadata            = baseCtx.Metadata,
             Participants        = participants,
             Sender              = sender,

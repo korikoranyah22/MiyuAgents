@@ -17,11 +17,12 @@
     </PackageReference>
     <PackageReference Include="NSubstitute"                         Version="5.3.0" />
     <PackageReference Include="FluentAssertions"                    Version="7.0.0" />
-    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.5" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.6" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\MiyuAgents.csproj" />
+    <ProjectReference Include="..\..\testing\MiyuAgents.Testing\MiyuAgents.Testing.csproj" />
   </ItemGroup>
 
 </Project>

@@ -16,6 +16,9 @@ public abstract class MemoryAgentBase<TQuery, TResult>(ILogger<MemoryAgentBase<T
     public event AsyncEventHandler<MemoryRetrievedEventArgs<TResult>>? OnMemoryRetrieved;
     public event AsyncEventHandler<MemoryStoredEventArgs>?             OnMemoryStored;
 
+    protected Task FireMemoryStoredAsync(AgentContext ctx, string storageId, DateTime storedAt) =>
+        FireAsync(OnMemoryStored, new MemoryStoredEventArgs(AgentId, ctx.ConversationId, ctx.MessageId, storageId, storedAt));
+
     // AgentBase.ExecuteCoreAsync calls this
     protected override sealed async Task<TResult?> ExecuteCoreAsync(
         AgentContext ctx, CancellationToken ct)

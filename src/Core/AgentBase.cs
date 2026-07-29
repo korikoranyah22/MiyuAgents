@@ -13,6 +13,24 @@ public abstract class AgentBase<TResult> : IAgent
     public abstract string    AgentName { get; }
     public abstract AgentRole Role      { get; }
 
+    /// <summary>
+    /// Preferred LLM models in priority order.
+    /// The first model that has a matching gateway will be used.
+    /// Override in derived classes to customise model selection.
+    /// </summary>
+    public virtual IReadOnlyList<string> PreferredModels => Array.Empty<string>();
+
+    /// <summary>
+    /// The gateway resolved from PreferredModels at startup.
+    /// Set automatically by the DI initialisation helper.
+    /// </summary>
+    public ILlmGateway? ResolvedGateway { get; set; }
+
+    /// <summary>
+    /// The model name that was actually chosen from PreferredModels.
+    /// </summary>
+    public string? ResolvedModel { get; set; }
+
     public event AsyncEventHandler<MessageReceivedEventArgs>?       OnMessageReceived;
     public event AsyncEventHandler<LlmCallRequestedEventArgs>?      OnLLMCallRequested;
     public event AsyncEventHandler<LlmCallRespondedEventArgs>?      OnLLMCallResponded;
