@@ -39,9 +39,10 @@ A .NET 10 framework for building multi-agent LLM systems with event-driven lifec
    - [IParticipantRouter](#iparticipantrouter)
    - [IGroupConversationOrchestrator](#igroupconversationorchestrator)
 9. [Composite Agents](#composite-agents)
-10. [Dependency Injection](#dependency-injection)
-11. [Examples](#examples)
-12. [Priority Reference](#priority-reference)
+10. [Workflows](#workflows)
+11. [Dependency Injection](#dependency-injection)
+12. [Examples](#examples)
+13. [Priority Reference](#priority-reference)
 
 ---
 
@@ -948,6 +949,310 @@ protected override async Task OrchestrateSubAgentsAsync(AgentContext ctx, Cancel
 ```csharp
 protected override bool DebugMode => Environment.GetEnvironmentVariable("DEBUG_AGENTS") == "1";
 ```
+
+---
+
+## Workflows
+
+MiyuAgents provides two complementary workflow runtimes:
+
+- `WorkflowNode` composes agents under a bounded control strategy: sequence, parallel fan-out,
+  loop, phased deliberation, plan/execute, or bounded conversation.
+- `RecursiveWorkflowNode<TState>` handles runtime-discovered single-branch depth with a stack-safe
+  trampoline, async return continuations, cycle detection, and depth/call/time budgets.
+
+Use the smallest primitive that matches the control shape. A known image/file batch belongs in
+`ParallelStrategy`; a repeated tool loop belongs in `LoopStrategy`; functional recursion is for a
+frame that discovers its next frame at runtime.
+
+```csharp
+var root = new WorkflowNode(
+    "research-and-write",
+    new SequenceStrategy(["research", "write"]),
+    new Dictionary<string, IAgent>
+    {
+        ["research"] = researchAgent,
+        ["write"] = writingAgent,
+    },
+    logger,
+    new ResiliencePolicy(MaxSteps: 10, MaxRetries: 1));
+
+var result = await root.RunNodeAsync(new NodeState
+{
+    Input = "Write a short brief about stack-safe recursion.",
+    Context = turnContext, // identity, history, model, metadata, and media are preserved
+}, ct);
+```
+
+Managed runs add cooperative stop, live steering, FIFO follow-ups, pending-input visibility, and
+semantic handoffs:
+
+```csharp
+var runs = new WorkflowRunManager();
+var run = runs.Start(root, initialState, options: new WorkflowRunOptions
+{
+    HandoffNode = handoffSummarizer,
+    MaxPriorTranscriptEntries = 400,
+});
+
+run.Steer("Make the next revision more concise."); // next safe checkpoint
+run.Enqueue("Then produce a five-line abstract."); // next pass, FIFO
+run.Stop();                                         // cooperative cancellation
+```
+
+Current-pass strategy progress lives in `NodeState.History`. Completed-pass context is intentionally
+kept separately in `PriorHistory` and `PriorTranscript`; an optional `HandoffNode` turns that raw
+context into a `WorkflowHandoff(summary, reason)`. Composite results carry bounded internal
+transcripts with child results, retries, driver questions/answers, lanes, signals, and artifact
+previews. Raw images and arbitrary payload graphs are not retained.
+
+`WorkflowRunManager` is intentionally in memory. Durable recovery, cross-instance ownership,
+persistent inboxes, generic answers to pending prompts, and hard termination of non-cooperative
+external work remain host responsibilities.
+
+For the complete, current reference—including every strategy and signal, drivers, steering
+checkpoints, handoffs, transcript limits, tracing, plugins, recursion, workflow authoring, safety
+limits, patterns, anti-patterns, and executable coverage—see
+[`docs/workflows.md`](docs/workflows.md).
+
+<!-- Archived legacy inline workflow guide. Hidden from rendered documentation; docs/workflows.md is canonical.
+
+A `WorkflowNode` is a composite agent — an `IAgent` (via `AgentBase<NodeResult>`) — that runs a
+**control loop** over its children. Each child is itself an `IAgent`, so a child can be another
+`WorkflowNode`: nesting is unbounded. The loop asks an `IControlStrategy` who runs next, executes
+the chosen children (sequentially, or with `Task.WhenAll` when the decision is parallel), and
+reacts to each child's `NodeSignal` until the strategy returns a terminal decision or the
+`ResiliencePolicy` budget is exhausted.
+
+| Type | Role |
+|---|---|
+| `WorkflowNode` | The composite node runtime: the control loop over its children. |
+| `RecursiveWorkflowNode<TState>` | Async functional recursion with an explicit trampoline/continuation stack, depth/call/time budgets, cycle detection, cancellation and nested trace lanes. |
+| `INodeAgent` | An `IAgent` that returns a rich `NodeResult` (`RunNodeAsync`). `WorkflowNode` implements it, so recursion (a node inside a node) goes through this path. A plain `IAgent` child is wrapped: `Ok → Done`, `Error → Failed`. |
+| `NodeResult` | What a node returns to its parent: the `AgentResponse` + a `NodeSignal` + produced `Artifacts` + an optional `Ask` + a bounded internal `Transcript`. Additive over `AgentResponse`. |
+| `NodeState` | Immutable per-step state: current-pass `History`, inherited `PriorHistory`/`PriorTranscript`, semantic `Handoff`, the original multimodal `AgentContext`, attachments and live steering. |
+| `NodeSignal` | How the parent should react: `Done`, `Continue`, `Failed`, `NeedsInput`, `NeedsReplanning`, `HandBack`, `RequestTurn`. |
+| `WorkflowRunManager` / `WorkflowRunHandle` | Starts a controllable run and exposes `Stop`, `Steer` (next safe checkpoint) and FIFO `Enqueue` (follow-up passes). |
+| `WorkflowTranscriptEntry` | Bounded internal record of child results, retries, driver questions/answers and artifact metadata; nested transcripts bubble to parents. |
+| `IControlStrategy` | "Who runs next": `NextAsync(state, ct) → ControlDecision`. Built-ins: `SequenceStrategy`, `ParallelStrategy`, `LoopStrategy`, `DeliberateStrategy`, `PlanExecuteStrategy`, `ConverseStrategy`, `FairConverseStrategy`. |
+| `ResiliencePolicy` | `MaxSteps` bounds the loop (exhausted → the node ends `Failed`, anti-hang); `MaxRetries` retries a child that returns `Failed`. |
+
+The loop, per step: `strategy.NextAsync(state)` → if the decision is terminal, end with `Emit ?? Done`
+→ run the chosen children → for each result, handle the signal: `Failed` is retried up to
+`MaxRetries`, then bubbles up (or an `ISignalReactiveStrategy` re-routes it); `NeedsInput` asks the
+`IDriver` and stores the answer in history; `RequestTurn` enqueues a `Bid` for the strategy to
+arbitrate; `Done`/`Continue` accumulate into `History`. A strategy that never terminates is cut by
+`MaxSteps` — the node ends `Failed` instead of hanging. Entry points: `RunNodeAsync(state)` (rich
+path, used for recursion) or `ProcessAsync(ctx)` (the `IAgent` path, wraps `ctx.UserMessage` as the
+node input).
+
+### Recursive and interactive runs
+
+`RecursiveWorkflowNode<TState>` is for intentional self-recursion. Its body is asynchronous and
+returns either `RecursionStep<TState>.Return(result)` or `Next(nextState, onReturn)`. `onReturn` is
+optional: omit it for tail recursion, or use it as an async continuation for non-tail folds. The
+runtime uses an explicit stack, so CLR stack depth does not grow. `RecursionPolicy` independently
+bounds depth, total calls and wall-clock duration; an optional cycle-key selector can express the
+domain's identity more precisely than `TState` equality.
+
+```csharp
+var imageBatch = new RecursiveWorkflowNode<int>(
+    "image-batch",
+    state => state.Context!.ImageAttachments.Count,
+    async (frame, ct) =>
+    {
+        if (frame.State == 0)
+            return RecursionStep<int>.Return(await UploadProcessedImages(ct));
+
+        var image = frame.NodeState.Context!.ImageAttachments[^frame.State];
+        var processed = await ProcessImage(image, ct);
+        return RecursionStep<int>.Next(frame.State - 1, (parent, child, _) =>
+            ValueTask.FromResult(child with
+            {
+                Artifacts = [processed, .. child.Artifacts],
+            }));
+    },
+    new RecursionPolicy { MaxDepth = 16, MaxDuration = TimeSpan.FromMinutes(5) },
+    cycleKey: frame => frame.State.ToString());
+
+var runs = new WorkflowRunManager();
+var run = runs.Start(imageBatch, new NodeState
+{
+    Input = "Process these images and upload them",
+    Context = turnContext, // retains all attached images
+});
+
+runs.Steer(run.RunId, "Use the private album instead"); // next frame/loop step
+runs.Enqueue(run.RunId, "Now write a short caption");   // next pass, FIFO
+runs.Stop(run.RunId);                                    // cooperative cancellation
+```
+
+Queued passes keep semantic context without reusing control-loop progress. The completed pass moves
+to `PriorHistory`; its bounded child/retry/driver transcript moves to `PriorTranscript`; the next
+pass starts with an empty `History`. An optional handoff node can turn that raw context into a short
+summary and an explicit reason for continuing:
+
+```csharp
+var run = runs.Start(root, initialState, options: new WorkflowRunOptions
+{
+    HandoffNode = summarizeHandoffNode,
+    MaxPriorTranscriptEntries = 400,
+});
+
+// summarizeHandoffNode reads state.PriorHistory and state.PriorTranscript,
+// then returns new WorkflowHandoff(summary, reason) in NodeResult.Response.Data.
+```
+
+Transcript entries retain bounded text previews and artifact metadata, never raw image/file payloads.
+Nested `WorkflowNode` transcripts bubble into their parent result. Hosts may persist the same entries
+in their event store when runs must survive refreshes, restarts or multiple application instances.
+
+`WorkflowNode` and `RecursiveWorkflowNode<TState>` consume steering automatically at safe points.
+A custom long-running `INodeAgent` can call `WorkflowRunScope.Current?.Checkpoint(state)` between
+tool/LLM steps. Steering never mutates a call already in flight, but it is visible before the next
+step. Stop uses the same cancellation token throughout the node tree.
+
+Both examples below are compiled and run by
+`tests/MiyuAgents.Tests.Unit/Workflows/ReadmeExamplesTests.cs`.
+
+### Example 1 — concurrent composition of independent nodes
+
+`WorkflowNode` is reentrant: per-run state lives in the `NodeState` that is passed in, not in the
+node, so independent instances (or the same instance) can run concurrently — the leaf nodes must be
+thread-safe. `Task.WhenAll` over `WorkflowNode` instances composes them:
+
+```csharp
+// Leaf: a stateless INodeAgent — one artifact per run (thread-safe: no mutable state).
+public sealed class SummarizeNode : INodeAgent
+{
+    public string    AgentId   => "summarize";
+    public string    AgentName => "Summarize";
+    public AgentRole Role      => AgentRole.Custom;
+
+    public Task<NodeResult> RunNodeAsync(NodeState state, CancellationToken ct = default)
+        => Task.FromResult(NodeResult.From(
+            new AgentResponse { AgentId = AgentId, AgentName = AgentName, Role = Role },
+            artifacts: [new Artifact("text", $"summary:{state.Input}")]));
+
+    public Task<AgentResponse> ProcessAsync(AgentContext ctx, CancellationToken ct = default)
+        => throw new NotSupportedException("the control loop uses RunNodeAsync");
+    // ...IAgent lifecycle events omitted (see INodeAgent)
+}
+
+var files = new[] { "a.txt", "b.txt", "c.txt" };
+
+// One independent WorkflowNode per file; the stateless leaf is shared (thread-safe),
+// which is the case that requires the leaf to have no mutable state.
+var summarize = new SummarizeNode();
+
+var jobs = files
+    .Select(file => (
+        Node: new WorkflowNode(
+            $"review-{file}",
+            new SequenceStrategy(["summarize"]),
+            new Dictionary<string, IAgent> { ["summarize"] = summarize },
+            logger),
+        File: file))
+    .ToList();
+
+// Real concurrent composition: Task.WhenAll over WorkflowNode instances.
+var results = await Task.WhenAll(
+    jobs.Select(j => j.Node.RunNodeAsync(new NodeState { Input = j.File })));
+
+foreach (var r in results)
+    Console.WriteLine($"{r.Signal}: {string.Join(", ", r.Artifacts.Select(a => a.Name))}");
+// Done: summary:a.txt
+// Done: summary:b.txt
+// Done: summary:c.txt
+```
+
+For the same fan-out inside a single node, `ParallelStrategy` runs all its children with
+`Task.WhenAll` internally (one step, then `Done`).
+
+### Example 2 — wrapper node with conditional retry, always bounded
+
+A wrapper node is a `WorkflowNode` whose strategy implements `ISignalReactiveStrategy`: when a
+child returns `Failed`, the strategy re-routes it (runs it again next step) or lets the signal
+bubble up. The retry is conditional (only `Failed` is retried, not `NeedsReplanning`/`HandBack`)
+and always bounded: `maxAttempts` caps the retries and `ResiliencePolicy.MaxSteps` caps the whole
+loop. (`WorkflowNode` also retries `Failed` children out of the box via
+`ResiliencePolicy(MaxRetries: n)`; the strategy variant below makes the condition explicit.)
+
+```csharp
+// The inner node: fails (Failed) the first 2 calls — a transient failure.
+public sealed class FlakyFetchNode : INodeAgent
+{
+    int _calls;
+
+    public string    AgentId   => "fetch";
+    public string    AgentName => "Fetch";
+    public AgentRole Role      => AgentRole.Custom;
+
+    public Task<NodeResult> RunNodeAsync(NodeState state, CancellationToken ct = default)
+    {
+        var call = Interlocked.Increment(ref _calls);
+        return call <= 2
+            ? Task.FromResult(new NodeResult
+            {
+                Response = new AgentResponse
+                {
+                    AgentId = AgentId, AgentName = AgentName, Role = Role,
+                    Status = AgentStatus.Error, ErrorMessage = "transient",
+                },
+                Signal = NodeSignal.Failed,
+            })
+            : Task.FromResult(NodeResult.From(
+                new AgentResponse { AgentId = AgentId, AgentName = AgentName, Role = Role },
+                artifacts: [new Artifact("text", "fetch:ok")]));
+    }
+
+    public Task<AgentResponse> ProcessAsync(AgentContext ctx, CancellationToken ct = default)
+        => throw new NotSupportedException("the control loop uses RunNodeAsync");
+    // ...IAgent lifecycle events omitted (see INodeAgent)
+}
+
+// The wrapper strategy: run the child; if its signal is Failed (the condition), re-route it
+// (loop-back) up to maxAttempts. Only framework primitives: IControlStrategy +
+// ISignalReactiveStrategy; NodeState.History counts the attempts.
+public sealed class ConditionalRetryStrategy(string childId, int maxAttempts)
+    : IControlStrategy, ISignalReactiveStrategy
+{
+    public string Name => "conditional-retry";
+
+    public Task<ControlDecision> NextAsync(NodeState state, CancellationToken ct = default)
+        => Task.FromResult(state.History.Any(h => h.Response.AgentId == childId)
+            ? ControlDecision.Stop()
+            : ControlDecision.Run(childId));
+
+    public Task<ControlDecision?> OnChildSignalAsync(
+        NodeState state, string child, NodeResult result, CancellationToken ct = default)
+    {
+        var attempts = state.History.Count(h => h.Response.AgentId == childId);
+        return Task.FromResult<ControlDecision?>(
+            result.Signal == NodeSignal.Failed && attempts < maxAttempts
+                ? ControlDecision.Run(childId)
+                : null); // exhausted or not transient → the signal bubbles up
+    }
+}
+
+// The wrapper: a WorkflowNode with that strategy. maxAttempts = retry cap;
+// ResiliencePolicy.MaxSteps = the loop's hard budget (anti-hang). Always bounded.
+var wrapper = new WorkflowNode(
+    "fetch-with-retry",
+    new ConditionalRetryStrategy("fetch", maxAttempts: 3),
+    new Dictionary<string, IAgent> { ["fetch"] = new FlakyFetchNode() },
+    logger,
+    new ResiliencePolicy(MaxSteps: 50));
+
+var r = await wrapper.RunNodeAsync(new NodeState { Input = "go" });
+// fetch ran 3 times (2 transient failures + 1 ok) → r.Signal == Done.
+// With a child that always fails, the wrapper exhausts maxAttempts and r.Signal == Failed —
+// it never loops forever.
+```
+
+---
+
+-->
 
 ---
 

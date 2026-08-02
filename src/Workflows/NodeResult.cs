@@ -21,6 +21,12 @@ public sealed record NodeResult
     /// <summary>Si <see cref="Signal"/> == <see cref="NodeSignal.NeedsInput"/>: la pregunta que el Driver debe responder.</summary>
     public string? Ask { get; init; }
 
+    /// <summary>
+    /// Bounded internal execution transcript. Composite nodes bubble child transcripts so a later
+    /// handoff can explain how the result was reached without depending on a UI-only event stream.
+    /// </summary>
+    public IReadOnlyList<WorkflowTranscriptEntry> Transcript { get; init; } = [];
+
     public static NodeResult From(
         AgentResponse response,
         NodeSignal signal = NodeSignal.Done,

@@ -46,7 +46,7 @@ public sealed class WorkflowNode : AgentBase<NodeResult>, ICompositeAgent, INode
 
     // ── Camino IAgent (ProcessAsync via AgentBase): arma un NodeState desde el ctx y corre el loop.
     protected override async Task<NodeResult?> ExecuteCoreAsync(AgentContext ctx, CancellationToken ct)
-        => await RunNodeAsync(new NodeState { Input = ctx.UserMessage }, ct);
+        => await RunNodeAsync(new NodeState { Input = ctx.UserMessage, Context = ctx }, ct);
 
     // ── Camino rico (recursión Node↔Node y entry directo desde el Driver/host).
     public async Task<NodeResult> RunNodeAsync(NodeState state, CancellationToken ct = default)
@@ -62,14 +62,20 @@ public sealed class WorkflowNode : AgentBase<NodeResult>, ICompositeAgent, INode
     async Task<NodeResult> RunLoopAsync(NodeState state, string lane, CancellationToken ct)
     {
         var artifacts = new List<Artifact>();
+        var transcript = new WorkflowTranscriptBuffer(
+            _policy.MaxTranscriptEntries,
+            _policy.MaxTranscriptTextLength);
         ControlDecision? pending = null;   // re-ruteo pedido por una ISignalReactiveStrategy (loop-back)
 
         for (var step = 0; step < _policy.MaxSteps; step++)
         {
-            var decision = pending ?? await _strategy.NextAsync(state, ct);
+            // Safe steering checkpoint: injected user messages become visible to the strategy and
+            // every child from this control-loop iteration onward.
+            state = WorkflowRunScope.Current?.Checkpoint(state) ?? state;
+            var decision = pending ?? await _strategy.NextAsync(state, ct).WaitAsync(ct);
             pending = null;
             if (decision.IsTerminal)
-                return Terminal(decision.Emit ?? NodeSignal.Done, artifacts);
+                return Terminal(decision.Emit ?? NodeSignal.Done, artifacts, transcript.Snapshot());
 
             var settled = new List<NodeResult>();
             var newBids = new List<Bid>();
@@ -83,9 +89,22 @@ public sealed class WorkflowNode : AgentBase<NodeResult>, ICompositeAgent, INode
                 var attempts = 0;
                 while (result.Signal == NodeSignal.Failed && attempts < _policy.MaxRetries)
                 {
+                    transcript.AddResult(
+                        childId,
+                        $"{lane}/{childId}",
+                        attempts == 0 ? WorkflowTranscriptKind.ChildResult : WorkflowTranscriptKind.Retry,
+                        result,
+                        state.Round);
                     attempts++;
                     result = await RunOneAsync(childId, state, lane, ct);
                 }
+
+                transcript.AddResult(
+                    childId,
+                    $"{lane}/{childId}",
+                    attempts == 0 ? WorkflowTranscriptKind.ChildResult : WorkflowTranscriptKind.Retry,
+                    result,
+                    state.Round);
 
                 artifacts.AddRange(result.Artifacts);
                 await Emit(TraceKind.ChildResult, $"{lane}/{childId}", actor: childId, text: result.Signal.ToString());
@@ -99,19 +118,27 @@ public sealed class WorkflowNode : AgentBase<NodeResult>, ICompositeAgent, INode
                         settled.Add(result);
                         var reaction = _strategy is ISignalReactiveStrategy react
                             ? await react.OnChildSignalAsync(
-                                state with { History = [.. state.History, .. settled] }, childId, result, ct)
+                                state with { History = [.. state.History, .. settled] }, childId, result, ct).WaitAsync(ct)
                             : null;
                         if (reaction is null)
-                            return Terminal(result.Signal, artifacts);              // default: sube al padre
+                            return Terminal(result.Signal, artifacts, transcript.Snapshot()); // default: sube al padre
                         if (reaction.IsTerminal)
-                            return Terminal(reaction.Emit ?? result.Signal, artifacts);
+                            return Terminal(reaction.Emit ?? result.Signal, artifacts, transcript.Snapshot());
                         pending = reaction;                                         // re-rutea (p.ej. vuelve a planning)
                         routed  = true;
                         break;
                     case NodeSignal.NeedsInput:
-                        var answer = _driver is null ? "" : await _driver.AnswerAsync(result.Ask ?? "", state, ct);
-                        settled.Add(result);
-                        settled.Add(DriverAnswer(answer));                          // la respuesta entra al historial
+                        var ask = result.Ask ?? "";
+                        transcript.AddDriverQuestion($"{lane}/{childId}", ask, state.Round);
+                        using (WorkflowRunScope.Current?.BeginWaitingForInput(ask))
+                        {
+                            var answer = _driver is null
+                                ? ""
+                                : await _driver.AnswerAsync(ask, state, ct).WaitAsync(ct);
+                            transcript.AddDriverAnswer($"{lane}/{childId}", answer, state.Round);
+                            settled.Add(result);
+                            settled.Add(DriverAnswer(answer));                      // la respuesta entra al historial
+                        }
                         break;
                     case NodeSignal.RequestTurn:
                         newBids.Add(new Bid(childId));                              // §3.6: bidea para el próximo turno
@@ -136,7 +163,7 @@ public sealed class WorkflowNode : AgentBase<NodeResult>, ICompositeAgent, INode
         }
 
         // Presupuesto agotado → falla acotada (anti-cuelgue; §5).
-        return Terminal(NodeSignal.Failed, artifacts);
+        return Terminal(NodeSignal.Failed, artifacts, transcript.Snapshot());
     }
 
     // ── helpers del loop ───────────────────────────────────────────────────────
@@ -163,11 +190,18 @@ public sealed class WorkflowNode : AgentBase<NodeResult>, ICompositeAgent, INode
         {
             NodeResult result;
             if (child is INodeAgent node)                       // Node rico (recursión) → RunNodeAsync
-                result = await node.RunNodeAsync(state, ct);
+                result = await node.RunNodeAsync(state, ct).WaitAsync(ct);
             else                                                // IAgent común → ProcessAsync + envolver
             {
-                var ctx = AgentContext.For("workflow", Guid.NewGuid().ToString("N"), state.Input);
-                result  = AsNodeResult(await child.ProcessAsync(ctx, ct));
+                // Preserve the original multimodal/identity context across nested nodes. The record
+                // copy keeps its shared accumulator while exposing steering and newly attached media.
+                var ctx = state.Context is { } source
+                    ? source with { UserMessage = state.EffectiveInput, Attachments = state.EffectiveAttachments }
+                    : AgentContext.For("workflow", Guid.NewGuid().ToString("N"), state.EffectiveInput) with
+                    {
+                        Attachments = state.EffectiveAttachments,
+                    };
+                result  = AsNodeResult(await child.ProcessAsync(ctx, ct).WaitAsync(ct));
             }
 
             // El strategy direcciona a los hijos por su ROSTER-ID (la key del roster), que puede diferir
@@ -192,7 +226,10 @@ public sealed class WorkflowNode : AgentBase<NodeResult>, ICompositeAgent, INode
         r.Data as NodeResult
         ?? NodeResult.From(r, r.Status == AgentStatus.Error ? NodeSignal.Failed : NodeSignal.Done);
 
-    NodeResult Terminal(NodeSignal signal, IReadOnlyList<Artifact> artifacts) => new()
+    NodeResult Terminal(
+        NodeSignal signal,
+        IReadOnlyList<Artifact> artifacts,
+        IReadOnlyList<WorkflowTranscriptEntry> transcript) => new()
     {
         Response = new AgentResponse
         {
@@ -201,6 +238,7 @@ public sealed class WorkflowNode : AgentBase<NodeResult>, ICompositeAgent, INode
         },
         Signal    = signal,
         Artifacts = artifacts,
+        Transcript = transcript,
     };
 
     NodeResult Fail(string id, string msg) => new()
