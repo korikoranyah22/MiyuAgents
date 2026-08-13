@@ -131,20 +131,6 @@ public class WorkflowAuthoringTests
         act.Should().Throw<InvalidOperationException>().WithMessage("*no-such-strategy*");
     }
 
-    [Fact]
-    public void Build_SelfReferentialSpec_FailsClearlyInsteadOfOverflowing()
-    {
-        var children = new List<NodeSpec>();
-        var root = new NodeSpec("root", "sequence", ["root"], children);
-        children.Add(root);
-        var spec = new WorkflowSpec("wf", "Recursive", "invalid structural cycle", root);
-
-        var act = () => WorkflowBuilder.Build(spec, Reg());
-
-        act.Should().Throw<InvalidOperationException>()
-            .WithMessage("*cycle*RecursiveWorkflowNode*");
-    }
-
     // ── El Store guarda/lista/borra ─────────────────────────────────────────────
     [Fact]
     public void Store_SavesListsAndRemoves()

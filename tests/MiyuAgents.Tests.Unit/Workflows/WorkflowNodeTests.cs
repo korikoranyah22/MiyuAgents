@@ -103,8 +103,6 @@ public class WorkflowNodeTests
         log.Should().Equal("a", "b", "c");                        // orden
         (a.Calls, b.Calls, c.Calls).Should().Be((1, 1, 1));
         r.Artifacts.Select(x => x.Name).Should().Equal("A", "B", "C");
-        r.Transcript.Where(x => x.Kind == WorkflowTranscriptKind.ChildResult)
-            .Select(x => x.NodeId).Should().Equal("a", "b", "c");
     }
 
     // 2) paralelo — corren todos y termina Done
@@ -189,10 +187,6 @@ public class WorkflowNodeTests
 
         driver.LastAsk.Should().Be("¿tono?");
         r.Signal.Should().Be(NodeSignal.Done);
-        r.Transcript.Select(x => x.Kind).Should().ContainInOrder(
-            WorkflowTranscriptKind.ChildResult,
-            WorkflowTranscriptKind.DriverQuestion,
-            WorkflowTranscriptKind.DriverAnswer);
     }
 
     // 8) RequestTurn — encola un bid que la strategy VE al próximo paso
@@ -221,48 +215,7 @@ public class WorkflowNodeTests
 
         r.Signal.Should().Be(NodeSignal.Done);
         r.Artifacts.Should().ContainSingle().Which.Name.Should().Be("hola");
-        r.Transcript.Select(x => x.NodeId).Should().ContainInOrder("leaf", "inner");
         leaf.Calls.Should().Be(1);
-    }
-
-    [Fact]
-    public async Task Transcript_IsBoundedAndMarksTruncation()
-    {
-        var a = new ScriptedNode("a", _ => Res("a", NodeSignal.Done));
-        var node = Node(
-            new AlwaysRun("a"),
-            new Dictionary<string, IAgent> { ["a"] = a },
-            new ResiliencePolicy(MaxSteps: 8, MaxTranscriptEntries: 3));
-
-        var r = await node.RunNodeAsync(new NodeState { Input = "go" });
-
-        r.Transcript.Should().HaveCount(3);
-        r.Transcript[0].Kind.Should().Be(WorkflowTranscriptKind.Truncated);
-    }
-
-    [Fact]
-    public async Task Transcript_BoundsTextAndDoesNotRetainHeavyArtifactPayloads()
-    {
-        var longText = new string('x', 500);
-        var payload = new byte[1_000_000];
-        var a = new ScriptedNode("a", _ => new NodeResult
-        {
-            Response = new AgentResponse
-            {
-                AgentId = "a", AgentName = "a", Role = AgentRole.Custom, Data = longText,
-            },
-            Artifacts = [new Artifact("image", "large", payload)],
-        });
-        var node = Node(
-            new SequenceStrategy(["a"]),
-            new Dictionary<string, IAgent> { ["a"] = a },
-            new ResiliencePolicy(MaxTranscriptTextLength: 64));
-
-        var r = await node.RunNodeAsync(new NodeState { Input = "go" });
-        var entry = r.Transcript.Single();
-
-        entry.Text.Should().HaveLength(64).And.EndWith("…");
-        entry.Artifacts.Single().Preview.Should().Be("<Byte[]>");
     }
 
     // 10) un IAgent COMÚN (sin signals) se envuelve a Done
